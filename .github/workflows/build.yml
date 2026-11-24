@@ -1,0 +1,95 @@
+name: Build Android APK & Run Lint
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build APK & Lint Check
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Locate & Extract Android Source ZIP
+        id: extract
+        run: |
+          set -e
+          echo "Searching for Android Source ZIP in repository..."
+          ZIP_FILE=$(find . -maxdepth 2 -type f -name "*.zip" | sort | head -n 1)
+
+          if [ -n "$ZIP_FILE" ]; then
+            echo "Found ZIP archive: $ZIP_FILE"
+            unzip -t "$ZIP_FILE"
+            rm -rf extracted_source
+            mkdir -p extracted_source
+            unzip -q "$ZIP_FILE" -d extracted_source
+            SEARCH_DIR="extracted_source"
+          else
+            echo "No ZIP file found; checking direct repository source..."
+            SEARCH_DIR="."
+          fi
+
+          SETTINGS_FILE=$(find "$SEARCH_DIR" -maxdepth 4 \( -name "settings.gradle" -o -name "settings.gradle.kts" \) | head -n 1)
+          if [ -z "$SETTINGS_FILE" ]; then
+            echo "::error::Could not locate settings.gradle or settings.gradle.kts!"
+            exit 1
+          fi
+
+          PROJECT_ROOT=$(dirname "$SETTINGS_FILE")
+          echo "Detected Android Project Root: $PROJECT_ROOT"
+          echo "project_root=$PROJECT_ROOT" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android SDK Components & Accept Licenses
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Setup Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Validate Gradle & Build Debug APK
+        working-directory: ${{ steps.extract.outputs.project_root }}
+        run: |
+          gradle tasks --no-daemon
+          gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Run Android Lint
+        id: lint
+        working-directory: ${{ steps.extract.outputs.project_root }}
+        run: |
+          gradle lintDebug --no-daemon --stacktrace
+
+      - name: Upload Build & Lint Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-and-build-reports
+          path: |
+            ${{ steps.extract.outputs.project_root }}/app/build/reports/
+          if-no-files-found: ignore
+
+      - name: Upload Debug APK Artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Apps-Backup-Restore-Debug-APK
+          path: |
+            ${{ steps.extract.outputs.project_root }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
